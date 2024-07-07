@@ -1,71 +1,57 @@
-from simple_websocket_server import WebSocketServer, WebSocket
-import simple_http_server
-import urllib
-import ssl
-from http.server import HTTPServer
-from socketserver import ThreadingMixIn
-from urllib.parse import urlparse, urlunparse
+import socket
+import threading
 
-PORT = 9097
+class ProxyServer:
+    def __init__(self, port):
+        self.port = port
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.bind(("localhost", port))
+        self.server_socket.listen(5)
 
-class MyProxy(simple_http_server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        url = self.path[1:]
-        parsed_url = urlparse(url)
-        if parsed_url.scheme == '':
-            url = 'http://' + url
-        self.send_response(200)
-        self.end_headers()
-        self.copyfile(urllib.request.urlopen(url), self.wfile)
+    def handle_request(self, client_socket, client_address):
+        request = client_socket.recv(1024)
+        if not request:
+            client_socket.close()
+            return
 
-    def do_POST(self):
-        url = self.path[1:]
-        parsed_url = urlparse(url)
-        if parsed_url.scheme == '':
-            url = 'http://' + url
-        length = int(self.headers.getheader('content-length'))
-        data = self.rfile.read(length)
-        req = urllib.request.Request(url, data=data, headers=dict(self.headers))
-        response = urllib.request.urlopen(req)
-        self.send_response(response.getcode())
-        for header, value in response.info().items():
-            self.send_header(header, value)
-        self.end_headers()
-        self.copyfile(response, self.wfile)
+        # Parse the request
+        headers = request.decode().split("\r\n")
+        method, url, protocol = headers[0].split()
+        url_components = url.split("//")[-1].split("/")
+        host = url_components[0]
+        port = 80
+        if ":" in host:
+            host, port = host.split(":")
+            port = int(port)
 
-    def do_PUT(self):
-        url = self.path[1:]
-        parsed_url = urlparse(url)
-        if parsed_url.scheme == '':
-            url = 'http://' + url
-        length = int(self.headers.getheader('content-length'))
-        data = self.rfile.read(length)
-        req = urllib.request.Request(url, data=data, method='PUT', headers=dict(self.headers))
-        response = urllib.request.urlopen(req)
-        self.send_response(response.getcode())
-        for header, value in response.info().items():
-            self.send_header(header, value)
-        self.end_headers()
-        self.copyfile(response, self.wfile)
+        # Create a socket to the target server
+        target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        target_socket.connect((host, port))
 
-    def do_DELETE(self):
-        url = self.path[1:]
-        parsed_url = urlparse(url)
-        if parsed_url.scheme == '':
-            url = 'http://' + url
-        req = urllib.request.Request(url, method='DELETE', headers=dict(self.headers))
-        response = urllib.request.urlopen(req)
-        self.send_response(response.getcode())
-        for header, value in response.info().items():
-            self.send_header(header, value)
-        self.end_headers()
-        self.copyfile(response, self.wfile)
+        # Send the request to the target server
+        target_socket.sendall(request)
 
-class ThreadingSimpleHTTPSServer(ThreadingMixIn, HTTPServer):
-    def __init__(self, server_address, RequestHandlerClass, ssl_certfile, ssl_keyfile):
-        HTTPServer.__init__(self, server_address, RequestHandlerClass)
-        self.socket = ssl.wrap_socket(self.socket, certfile=ssl_certfile, keyfile=ssl_keyfile, server_side=True)
+        # Receive the response from the target server
+        response = b""
+        while True:
+            data = target_socket.recv(1024)
+            if not data:
+                break
+            response += data
 
-httpd = ThreadingSimpleHTTPSServer(('', PORT), MyProxy, 'cert.pem', 'key.pem')
-print("Now serving at " + str(PORT))
-httpd.serve_forever()
+        # Send the response back to the client
+        client_socket.sendall(response)
+
+        # Close the sockets
+        target_socket.close()
+        client_socket.close()
+
+    def run(self):
+        while True:
+            client_socket, client_address = self.server_socket.accept()
+            threading.Thread(target=self.handle_request, args=(client_socket, client_address)).start()
+
+if __name__ == "__main__":
+    proxy_server = ProxyServer(9097)
+    print("Proxy server started on port 9097")
+    proxy_server.run()
